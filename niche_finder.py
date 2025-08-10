@@ -1,114 +1,116 @@
 import streamlit as st
-from googleapiclient.discovery import build
 import pandas as pd
-import requests
-from datetime import datetime, timedelta
 import os
+from datetime import datetime, timedelta
+from googleapiclient.discovery import build
 
-# === CONFIG ===
-API_KEY = os.getenv("API_KEY")  # From Streamlit Cloud Environment Variables
-YOUTUBE_API_SERVICE_NAME = "youtube"
-YOUTUBE_API_VERSION = "v3"
+API_KEY = os.getenv("API_KEY")
+youtube = build("youtube", "v3", developerKey=API_KEY)
 
-def get_keyword_suggestions(query):
-    """Fetch keyword suggestions from YouTube Autocomplete API."""
-    url = f"http://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q={query}"
-    response = requests.get(url)
-    if response.status_code == 200:
-        suggestions = response.json()[1]
-        return suggestions
-    return []
+SNAPSHOT_FILE = "data/snapshots.csv"
 
-def youtube_search(keyword, max_results=10, recent_days=None):
-    youtube = build(YOUTUBE_API_SERVICE_NAME, YOUTUBE_API_VERSION, developerKey=API_KEY)
+st.set_page_config(page_title="Niche Finder Pro", layout="wide")
 
-    search_response = youtube.search().list(
-        q=keyword,
-        type="video",
-        order="viewCount",
-        part="id,snippet",
-        maxResults=max_results
-    ).execute()
+tab1, tab2 = st.tabs(["🔍 Niche Finder", "📈 Channel Growth Finder"])
 
-    results = []
-    cutoff_date = None
-    if recent_days:
-        cutoff_date = datetime.utcnow() - timedelta(days=recent_days)
+# ------------------- TAB 1: NICHE FINDER -------------------
+with tab1:
+    st.header("YouTube Niche Finder")
+    keyword = st.text_input("Enter keyword:")
+    max_results = st.slider("Max results", 5, 50, 10)
 
-    for item in search_response.get("items", []):
-        video_id = item["id"]["videoId"]
-        title = item["snippet"]["title"]
-        channel_title = item["snippet"]["channelTitle"]
-        published_at = item["snippet"]["publishedAt"]
+    if st.button("Find Niches"):
+        if not keyword:
+            st.warning("Please enter a keyword")
+        else:
+            request = youtube.search().list(
+                q=keyword,
+                part="snippet",
+                type="channel",
+                maxResults=max_results
+            )
+            response = request.execute()
 
-        # Skip if filtering recent uploads
-        if cutoff_date:
-            video_date = datetime.strptime(published_at, "%Y-%m-%dT%H:%M:%SZ")
-            if video_date < cutoff_date:
-                continue
+            results = []
+            for item in response.get("items", []):
+                channel_id = item["snippet"]["channelId"]
+                channel_title = item["snippet"]["title"]
+                stats_req = youtube.channels().list(
+                    part="statistics",
+                    id=channel_id
+                ).execute()
+                stats = stats_req["items"][0]["statistics"]
+                subs = int(stats.get("subscriberCount", 0))
+                views = int(stats.get("viewCount", 0))
+                videos = int(stats.get("videoCount", 0))
 
-        video_response = youtube.videos().list(
-            part="statistics,snippet",
-            id=video_id
-        ).execute()
+                results.append({
+                    "Channel": channel_title,
+                    "Channel ID": channel_id,
+                    "Subscribers": subs,
+                    "Views": views,
+                    "Videos": videos
+                })
 
-        stats = video_response["items"][0]["statistics"]
-        views = int(stats.get("viewCount", 0))
-        likes = int(stats.get("likeCount", 0)) if "likeCount" in stats else 0
-        comments = int(stats.get("commentCount", 0)) if "commentCount" in stats else 0
+                # Save snapshot for growth tracking
+                snapshot = pd.DataFrame([{
+                    "date": datetime.utcnow().strftime("%Y-%m-%d"),
+                    "channel_id": channel_id,
+                    "channel_title": channel_title,
+                    "subscribers": subs,
+                    "views": views,
+                    "videos": videos
+                }])
+                if os.path.exists(SNAPSHOT_FILE):
+                    old_df = pd.read_csv(SNAPSHOT_FILE)
+                    new_df = pd.concat([old_df, snapshot], ignore_index=True)
+                    new_df.to_csv(SNAPSHOT_FILE, index=False)
+                else:
+                    snapshot.to_csv(SNAPSHOT_FILE, index=False)
 
-        engagement_score = round(((likes + comments) / views) * 100, 2) if views > 0 else 0
+            df = pd.DataFrame(results)
+            st.dataframe(df)
+            st.download_button("Download CSV", df.to_csv(index=False), "niche_results.csv")
 
-        channel_id = video_response["items"][0]["snippet"]["channelId"]
-        channel_response = youtube.channels().list(
-            part="statistics",
-            id=channel_id
-        ).execute()
+# ------------------- TAB 2: CHANNEL GROWTH FINDER -------------------
+with tab2:
+    st.header("Channel Growth Finder")
 
-        subs = int(channel_response["items"][0]["statistics"].get("subscriberCount", 0))
-        demand_score = round(views / (subs + 1), 2)
-
-        results.append({
-            "Video Title": title,
-            "Channel": channel_title,
-            "Views": views,
-            "Subscribers": subs,
-            "Demand Score": demand_score,
-            "Engagement %": engagement_score,
-            "Published At": published_at
-        })
-
-    results.sort(key=lambda x: x["Demand Score"], reverse=True)
-    return results
-
-# === Streamlit UI ===
-st.set_page_config(page_title="YouTube Niche Finder", layout="wide")
-st.title("🚀 Enhanced YouTube Niche Finder")
-st.write("Analyze video niches with demand, engagement, and competition data.")
-
-keyword = st.text_input("Keyword:", "")
-max_results = st.slider("Number of results:", 5, 50, 10)
-recent_days = st.slider("Only show videos uploaded in the last X days (0 = no filter):", 0, 90, 0)
-
-if keyword.strip():
-    st.subheader("💡 Suggested Keywords")
-    suggestions = get_keyword_suggestions(keyword)
-    st.write(", ".join(suggestions))
-
-if st.button("Find Niche"):
-    if not API_KEY:
-        st.error("API Key not set! Please set API_KEY in Streamlit Cloud settings.")
-    elif keyword.strip() == "":
-        st.warning("Please enter a keyword.")
+    if not os.path.exists(SNAPSHOT_FILE):
+        st.info("No snapshot data yet. Run a search in Niche Finder first to build history.")
     else:
-        with st.spinner("Fetching data..."):
-            data = youtube_search(keyword, max_results, recent_days if recent_days > 0 else None)
-            df = pd.DataFrame(data)
-            if df.empty:
-                st.warning("No videos found for this filter.")
-            else:
-                st.success("Analysis complete!")
-                st.dataframe(df)
+        snapshots = pd.read_csv(SNAPSHOT_FILE)
+        snapshots["date"] = pd.to_datetime(snapshots["date"])
 
-                csv = df.to_csv(index=False).encode('utf-8')
-                st.download_button("📥 Download CSV", csv, f"{keyword}_niche_analysis.csv", "text/csv")
+        min_subs, max_subs = st.slider("Subscriber range", 0, 10_000_000, (0, 1_000_000), step=1000)
+        timeframe = st.selectbox("Growth timeframe", ["7d", "30d", "90d"])
+        min_videos, max_videos = st.slider("Video count range", 0, 5000, (0, 500))
+        min_views = st.number_input("Minimum views in current period", 0, 100_000_000, 0)
+
+        days = int(timeframe.replace("d", ""))
+        cutoff_date = datetime.utcnow() - timedelta(days=days)
+
+        latest = snapshots.groupby("channel_id").apply(lambda g: g.sort_values("date").iloc[-1])
+        past = snapshots[snapshots["date"] <= cutoff_date].groupby("channel_id").apply(lambda g: g.sort_values("date").iloc[-1])
+
+        growth_data = []
+        for cid, row in latest.iterrows():
+            if cid in past.index:
+                past_row = past.loc[cid]
+                sub_growth = row["subscribers"] - past_row["subscribers"]
+                view_growth = row["views"] - past_row["views"]
+                if (min_subs <= row["subscribers"] <= max_subs and
+                    min_videos <= row["videos"] <= max_videos and
+                    row["views"] >= min_views):
+                    growth_data.append({
+                        "Channel": row["channel_title"],
+                        "Subscribers": row["subscribers"],
+                        "Sub Growth": sub_growth,
+                        "Views": row["views"],
+                        "View Growth": view_growth,
+                        "Videos": row["videos"]
+                    })
+
+        growth_df = pd.DataFrame(growth_data).sort_values("Sub Growth", ascending=False)
+        st.dataframe(growth_df)
+        st.download_button("Download Growth Data", growth_df.to_csv(index=False), "channel_growth.csv")
